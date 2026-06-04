@@ -693,9 +693,16 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Chat error for user {user_id}: {e}\n{traceback.format_exc()}")
             try:
-                await progress_msg.edit_text(
-                    f"❌ Error processing message:\n<code>{str(e)[:500]}</code>"
-                )
+                err_str = str(e)
+                if "402" in err_str or "insufficient" in err_str.lower():
+                    msg = "💸 MiMo API balance শেষ! Top-up করো অথবা /model দিয়ে অন্য provider select করো।"
+                elif "401" in err_str or "unauthorized" in err_str.lower():
+                    msg = "🔑 API key invalid! .env এ AI_API_KEY check করো।"
+                elif "429" in err_str or "rate" in err_str.lower():
+                    msg = "⏳ Rate limited! কিছুক্ষণ অপেক্ষা করো।"
+                else:
+                    msg = f"❌ Error:\n<code>{err_str[:400]}</code>"
+                await progress_msg.edit_text(msg)
             except Exception:
                 pass
 
