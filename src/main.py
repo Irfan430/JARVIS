@@ -92,6 +92,7 @@ async def main():
             provider=config.ai.provider,
             api_key=config.ai.api_key,
             model=config.ai.model,
+            base_url=config.ai.base_url,
             system_prompt=config.ai.system_prompt,
         )
         logger.info(f"AI backend initialized: {config.ai.provider}/{config.ai.model}")

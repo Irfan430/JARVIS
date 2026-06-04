@@ -24,20 +24,38 @@ class TelegramConfig(BaseSettings):
     webhook_url: Optional[str] = Field(default=None, description="Webhook URL (optional, for production)")
     parse_mode: str = Field(default="HTML", description="Message parse mode: HTML or Markdown")
 
+    @field_validator("allowed_users", mode="before")
+    @classmethod
+    def parse_allowed_users(cls, v):
+        """Handle comma-separated, JSON list, or single int formats."""
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("["):
+                import json
+                return json.loads(v)
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        if isinstance(v, int):
+            return [v]
+        return v
+
     model_config = {"env_prefix": "TELEGRAM_"}
 
 
 class AIConfig(BaseSettings):
     """AI/LLM provider configuration."""
-    provider: str = Field(default="openai", description="AI provider: openai, anthropic, ollama")
+    provider: str = Field(default="mimo", description="AI provider: openai, anthropic, mimo")
     api_key: str = Field(default="", description="AI provider API key")
-    model: str = Field(default="gpt-4o", description="Model name to use")
+    model: str = Field(default="mimo-v2.5-pro", description="Model name to use")
+    base_url: str = Field(default="https://api.xiaomimimo.com/v1", description="API base URL")
     max_tokens: int = Field(default=4096, ge=1, le=128000)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     system_prompt: str = Field(
-        default="You are JARVIS, a highly capable AI assistant inspired by the AI from Iron Man. "
+        default="You are JARVIS, a highly capable AI assistant. "
                 "You are helpful, witty, and slightly formal in tone. "
-                "Always strive to be accurate and useful.",
+                "Always strive to be accurate and useful. "
+                "Respond in the same language the user writes in.",
         description="System prompt for the AI"
     )
 

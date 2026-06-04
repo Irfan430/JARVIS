@@ -37,17 +37,17 @@ class MiMoProvider(BaseLLMProvider):
     name = "mimo"
 
     DEFAULT_MODELS = {
-        "fast": "MiMo-7B-Base",
-        "balanced": "MiMo-7B-RL",
-        "powerful": "MiMo-7B-RL",
-        "default": "MiMo-7B-RL",
+        "fast": "mimo-v2.5-pro",
+        "balanced": "mimo-v2.5-pro",
+        "powerful": "mimo-v2.5-pro",
+        "default": "mimo-v2.5-pro",
     }
 
     def __init__(
         self,
         api_key: str = "",
         base_url: str = "https://api.xiaomimimo.com/v1",
-        default_model: str = "MiMo-7B-RL",
+        default_model: str = "mimo-v2.5-pro",
         model: str = "",
         **kwargs: Any,
     ) -> None:

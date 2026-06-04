@@ -35,7 +35,7 @@ from loguru import logger
 def rate_limited(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
     """Decorator to apply rate limiting to a handler function."""
     @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+    async def wrapper(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         bot = context.bot_data.get("jarvis_bot")
         if bot and bot.rate_limiter:
             user_id = update.effective_user.id
@@ -45,7 +45,7 @@ def rate_limited(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable
                     f"⏳ Rate limited. Try again in {remaining:.0f}s."
                 )
                 return
-        return await func(update, context, *args, **kwargs)
+        return await func(self, update, context, *args, **kwargs)
     return wrapper
 
 
@@ -96,20 +96,20 @@ class TelegramBot:
     def _owner_only(func):
         """Decorator for owner-only commands."""
         @wraps(func)
-        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        async def wrapper(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
             bot = context.bot_data.get("jarvis_bot")
             if bot and bot.auth:
                 user_id = update.effective_user.id
                 if not bot.auth.is_owner(user_id):
                     await update.message.reply_text("⛔ Owner-only command.")
                     return
-            return await func(update, context, *args, **kwargs)
+            return await func(self, update, context, *args, **kwargs)
         return wrapper
 
     def _authorized_only(func):
         """Decorator for authorized-user-only commands."""
         @wraps(func)
-        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        async def wrapper(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
             bot = context.bot_data.get("jarvis_bot")
             if bot and bot.auth:
                 user_id = update.effective_user.id
@@ -119,7 +119,7 @@ class TelegramBot:
                         "Contact the bot owner for access."
                     )
                     return
-            return await func(update, context, *args, **kwargs)
+            return await func(self, update, context, *args, **kwargs)
         return wrapper
 
     async def _send_typing(self, update: Update, duration: float = 0.5):
@@ -227,7 +227,7 @@ class TelegramBot:
             return
         
         message = " ".join(context.args)
-        await self._handle_chat_message(update, message)
+        await self._handle_chat_message(update, message, context)
 
     @_authorized_only
     @rate_limited
@@ -241,7 +241,7 @@ class TelegramBot:
             return
         
         message = " ".join(context.args)
-        await self._handle_chat_message(update, message)
+        await self._handle_chat_message(update, message, context)
 
     @_authorized_only
     @rate_limited
@@ -542,9 +542,9 @@ class TelegramBot:
                 await update.message.reply_text(f"⚠️ Input rejected: {e}")
                 return
         
-        await self._handle_chat_message(update, message)
+        await self._handle_chat_message(update, message, context)
 
-    async def _handle_chat_message(self, update: Update, message: str):
+    async def _handle_chat_message(self, update: Update, message: str, context=None):
         """Core chat message handler."""
         user_id = update.effective_user.id
         
@@ -564,15 +564,25 @@ class TelegramBot:
         
         try:
             # Try to use the app's AI handler
-            bot_instance = context.bot_data.get("jarvis_bot")
+            bot_instance = context.bot_data.get("jarvis_bot") if context else self
             if bot_instance and hasattr(bot_instance, '_app') and bot_instance._app:
                 model = self._user_models.get(user_id, self.config.ai.model)
+                # Build messages list for the provider
+                messages = []
+                # Add system prompt if available
+                if self.config.ai.system_prompt:
+                    messages.append({"role": "system", "content": self.config.ai.system_prompt})
+                # Add conversation history
+                messages.extend([
+                    {"role": m["role"], "content": m["content"]}
+                    for m in self._conversations[user_id]
+                ])
                 response = await bot_instance._app.chat(
-                    message=message,
-                    user_id=user_id,
+                    messages=messages,
                     model=model,
-                    history=self._conversations[user_id],
                 )
+                # Extract content from ChatResponse object
+                response = response.content if hasattr(response, 'content') else str(response)
             else:
                 # Standalone mode — return a placeholder
                 response = (
