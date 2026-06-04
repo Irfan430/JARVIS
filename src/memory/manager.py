@@ -52,7 +52,7 @@ class MemoryManager:
         auto_save_facts: bool = True,
     ) -> None:
         self.stm = ShortTermMemory(max_messages=stm_max_messages)
-        self.ltm = LongTermMemory(db_path=ltm_db_path) if ltm_db_path is not False else LongTermMemory()
+        self.ltm = LongTermMemory(db_path=ltm_db_path) if ltm_db_path else LongTermMemory()
         self._auto_save = auto_save_facts
         self._fact_buffer: list[dict[str, Any]] = []
         logger.info("MemoryManager created (auto_save=%s)", auto_save_facts)

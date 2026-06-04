@@ -3,6 +3,7 @@ JARVIS Telegram Bot Interface
 Full-featured Telegram bot with command handling, voice support,
 inline buttons, progress indicators, and error handling.
 """
+from pathlib import Path
 
 import asyncio
 import time
@@ -68,7 +69,8 @@ class TelegramBot:
     - Per-user rate limiting
     """
 
-    def __init__(self, config, authenticator=None, rate_limiter=None, sanitizer=None):
+    def __init__(self, config, authenticator=None, rate_limiter=None, sanitizer=None,
+                 memory=None, voice=None, tool_router=None):
         """
         Initialize the Telegram bot.
         
@@ -77,21 +79,39 @@ class TelegramBot:
             authenticator: Authenticator instance (optional).
             rate_limiter: RateLimiter instance (optional).
             sanitizer: InputSanitizer instance (optional).
+            memory: MemoryManager instance (optional).
+            voice: VoiceManager instance (optional).
+            tool_router: ToolRouter instance (optional).
         """
         self.config = config
         self.auth = authenticator
         self.rate_limiter = rate_limiter
         self.sanitizer = sanitizer
+        self.memory = memory
+        self.voice = voice
+        self.tool_router = tool_router
         self.app: Optional[Application] = None
         self._handlers_registered = False
         
-        # Per-user conversation context
+        # Per-user conversation context (fallback if memory not available)
         self._conversations: Dict[int, list] = {}
         
-        # Current model per user
+        # Per-user model selection
         self._user_models: Dict[int, str] = {}
         
+        # Per-user voice mode
+        self._voice_mode: set = set()
+        
+        # Start time
+        self._start_time: Optional[float] = None
+        
         logger.info("TelegramBot initialized")
+        if self.memory:
+            logger.info("  ✓ Memory (STM+LTM) connected")
+        if self.voice:
+            logger.info("  ✓ Voice (STT+TTS) connected")
+        if self.tool_router:
+            logger.info("  ✓ Tool router connected")
 
     def _owner_only(func):
         """Decorator for owner-only commands."""
@@ -263,13 +283,19 @@ class TelegramBot:
         progress_msg = await update.message.reply_text("🔍 Searching...")
         
         try:
-            # Delegate to the main app's search handler if available
-            bot = context.bot_data.get("jarvis_bot")
-            if bot and hasattr(bot, '_app') and bot._app:
-                results = await bot._app.search(query)
-            else:
-                # Standalone search using duckduckgo
-                results = await self._standalone_search(query)
+            # Use ToolRouter if available
+            if self.tool_router:
+                outcome = await self.tool_router.dispatch("search", {"query": query}, timeout=15.0)
+                if hasattr(outcome, 'output'):
+                    results_text = outcome.output
+                    await progress_msg.edit_text(f"🔍 <b>Results for:</b> <i>{query}</i>\n\n{results_text[:3500]}")
+                    return
+                elif hasattr(outcome, 'error'):
+                    await progress_msg.edit_text(f"❌ Search error: {outcome.error}")
+                    return
+            
+            # Fallback to standalone search
+            results = await self._standalone_search(query)
             
             if results:
                 text = f"🔍 <b>Results for:</b> <i>{query}</i>\n\n"
@@ -388,11 +414,20 @@ class TelegramBot:
             )
             return
         
-        # Toggle voice mode in user context
-        current = context.user_data.get("voice_mode", False)
-        context.user_data["voice_mode"] = not current
+        # Check if VoiceManager is available
+        if not self.voice:
+            await update.message.reply_text(
+                "🔇 Voice module not loaded. Install edge-tts: pip install edge-tts"
+            )
+            return
         
-        new_state = context.user_data["voice_mode"]
+        # Toggle voice mode
+        if user_id in self._voice_mode:
+            self._voice_mode.discard(user_id)
+            new_state = False
+        else:
+            self._voice_mode.add(user_id)
+            new_state = True
         icon = "🔊" if new_state else "🔇"
         text = (
             f"{icon} Voice mode <b>{'enabled' if new_state else 'disabled'}</b>.\n\n"
@@ -448,6 +483,8 @@ class TelegramBot:
     async def cmd_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /clear command — clear conversation history."""
         user_id = update.effective_user.id
+        if self.memory:
+            self.memory.new_session(session_id=str(user_id))
         if user_id in self._conversations:
             self._conversations[user_id] = []
         context.user_data.clear()
@@ -479,11 +516,34 @@ class TelegramBot:
             f"👑 Owner: {'Yes' if self.auth and self.auth.is_owner(user_id) else 'No'}\n"
         )
         
+        # Memory stats
+        if self.memory:
+            try:
+                stats = self.memory.stats()
+                status_text += f"\n💾 Memory: STM={stats.get('stm_messages', 0)} msgs, LTM={stats.get('ltm_entries', 0)} facts\n"
+            except Exception:
+                pass
+        
+        # Voice status
+        if self.voice:
+            try:
+                avail = self.voice.is_available
+                status_text += f"🗣️ Voice: STT={'✓' if avail.get('stt') else '✗'}, TTS={'✓' if avail.get('tts') else '✗'}\n"
+            except Exception:
+                pass
+        
+        # Tools status
+        if self.tool_router:
+            try:
+                tools = self.tool_router.list_tools()
+                status_text += f"🔧 Tools: {len(tools)} registered ({', '.join(t.name for t in tools[:5])})\n"
+            except Exception:
+                pass
+        
         if rate_info:
             status_text += f"\n{rate_info}\n"
         
-        # Bot memory
-        status_text += f"\n🔧 Uptime: {self._get_uptime()}"
+        status_text += f"\n⏱️ Uptime: {self._get_uptime()}"
         
         await update.message.reply_text(status_text)
 
@@ -545,60 +605,83 @@ class TelegramBot:
         await self._handle_chat_message(update, message, context)
 
     async def _handle_chat_message(self, update: Update, message: str, context=None):
-        """Core chat message handler."""
+        """Core chat message handler — uses memory, tools, and voice."""
         user_id = update.effective_user.id
         
-        # Store in conversation
-        if user_id not in self._conversations:
-            self._conversations[user_id] = []
-        self._conversations[user_id].append({"role": "user", "content": message})
+        # ---- Store user message in memory ----
+        if self.memory:
+            self.memory.add_message("user", message, metadata={"user_id": user_id})
+        else:
+            # Fallback: use _conversations dict
+            if user_id not in self._conversations:
+                self._conversations[user_id] = []
+            self._conversations[user_id].append({"role": "user", "content": message})
+            if len(self._conversations[user_id]) > 50:
+                self._conversations[user_id] = self._conversations[user_id][-50:]
         
-        # Keep conversation history manageable (last 50 messages)
-        if len(self._conversations[user_id]) > 50:
-            self._conversations[user_id] = self._conversations[user_id][-50:]
-        
-        # Send typing indicator
+        # ---- Send typing indicator ----
         await self._send_typing(update, 1.0)
         
         progress_msg = await update.message.reply_text("🧠 Thinking...")
         
         try:
-            # Try to use the app's AI handler
-            bot_instance = context.bot_data.get("jarvis_bot") if context else self
-            if bot_instance and hasattr(bot_instance, '_app') and bot_instance._app:
-                model = self._user_models.get(user_id, self.config.ai.model)
-                # Build messages list for the provider
-                messages = []
-                # Add system prompt if available
-                if self.config.ai.system_prompt:
-                    messages.append({"role": "system", "content": self.config.ai.system_prompt})
-                # Add conversation history
-                messages.extend([
-                    {"role": m["role"], "content": m["content"]}
-                    for m in self._conversations[user_id]
-                ])
-                response = await bot_instance._app.chat(
-                    messages=messages,
-                    model=model,
-                )
-                # Extract content from ChatResponse object
-                response = response.content if hasattr(response, 'content') else str(response)
+            # ---- Try tool execution first (if message looks like a tool request) ----
+            tool_result = await self._try_tools(message, context)
+            if tool_result:
+                response = tool_result
             else:
-                # Standalone mode — return a placeholder
-                response = (
-                    "🤖 I'm in standalone mode. The AI backend is not connected.\n\n"
-                    "To connect the AI provider, make sure the full JARVIS "
-                    "application is properly initialized.\n\n"
-                    f"Your message was: <i>{message[:200]}</i>"
-                )
+                # ---- Use AI backend for chat ----
+                bot_instance = context.bot_data.get("jarvis_bot") if context else self
+                if bot_instance and hasattr(bot_instance, '_app') and bot_instance._app:
+                    model = self._user_models.get(user_id, self.config.ai.model)
+                    
+                    # Build messages list from memory
+                    if self.memory:
+                        messages = self.memory.get_context(system_prompt=self.config.ai.system_prompt)
+                    else:
+                        messages = []
+                        if self.config.ai.system_prompt:
+                            messages.append({"role": "system", "content": self.config.ai.system_prompt})
+                        messages.extend([
+                            {"role": m["role"], "content": m["content"]}
+                            for m in self._conversations.get(user_id, [])
+                        ])
+                    
+                    response = await bot_instance._app.chat(
+                        messages=messages,
+                        model=model,
+                    )
+                    # Extract content from ChatResponse object
+                    response = response.content if hasattr(response, 'content') else str(response)
+                else:
+                    response = (
+                        "🤖 I'm in standalone mode. The AI backend is not connected.\n\n"
+                        "To connect the AI provider, make sure the full JARVIS "
+                        "application is properly initialized.\n\n"
+                        f"Your message was: <i>{message[:200]}</i>"
+                    )
             
-            # Store response
-            self._conversations[user_id].append({
-                "role": "assistant", 
-                "content": response
-            })
+            # ---- Store assistant response in memory ----
+            if self.memory:
+                self.memory.add_message("assistant", response, metadata={"user_id": user_id})
+            else:
+                if user_id not in self._conversations:
+                    self._conversations[user_id] = []
+                self._conversations[user_id].append({"role": "assistant", "content": response})
             
-            # Handle long responses with split messages
+            # ---- Voice mode: send audio response ----
+            voice_enabled = user_id in self._voice_mode
+            if voice_enabled and self.voice:
+                try:
+                    audio_path = await self.voice.speak(response)
+                    if audio_path and Path(audio_path).exists():
+                        from telegram import InputFile
+                        with open(audio_path, 'rb') as af:
+                            await update.message.reply_voice(voice=af)
+                except Exception as ve:
+                    logger.warning(f"TTS failed: {ve}")
+            
+            # ---- Send text response (skip if voice was sent) ----
             if len(response) > 4000:
                 parts = self._split_message(response, 4000)
                 await progress_msg.edit_text(parts[0])
@@ -635,9 +718,40 @@ class TelegramBot:
             parts.append(text)
         return parts
 
+    async def _try_tools(self, message: str, context=None) -> Optional[str]:
+        """Try to execute message as a tool command. Returns result or None."""
+        if not self.tool_router:
+            return None
+        
+        msg = message.strip().lower()
+        
+        # Simple pattern matching for tool invocation
+        tool_map = {
+            ("calculate", "calc", "math"): ("calculator", {"expression": message}),
+            ("search", "find", "look up"): ("search", {"query": message}),
+            ("run python", "execute python", "python code"): ("python", {"code": message}),
+            ("list files", "ls", "dir"): ("file", {"action": "list", "path": "."}),
+            ("read file", "cat"): ("file", {"action": "read", "path": message.split(maxsplit=1)[-1] if " " in message else "."}),
+            ("system info", "sysinfo"): ("shell", {"command": "uname -a && free -h && df -h"}),
+        }
+        
+        for patterns, (tool_name, params) in tool_map.items():
+            if any(msg.startswith(p) or msg == p for p in patterns):
+                try:
+                    outcome = await self.tool_router.dispatch(tool_name, params, timeout=30.0)
+                    if hasattr(outcome, 'output'):
+                        return f"🔧 <b>{tool_name}</b> result:\n<pre>{outcome.output[:3000]}</pre>"
+                    elif hasattr(outcome, 'error'):
+                        return f"❌ Tool error: {outcome.error}"
+                except Exception as e:
+                    logger.warning(f"Tool dispatch error: {e}")
+                    return f"❌ Tool error: {str(e)[:200]}"
+        
+        return None
+
     @_authorized_only
     async def handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle voice messages — STT."""
+        """Handle voice messages — STT via VoiceManager or fallback whisper."""
         if not self.config.voice.enabled:
             await update.message.reply_text("🔇 Voice mode is not enabled.")
             return
@@ -646,12 +760,12 @@ class TelegramBot:
         
         try:
             # Download the voice file
-            voice = update.message.voice or update.message.audio
-            if not voice:
+            tg_voice = update.message.voice or update.message.audio
+            if not tg_voice:
                 await progress_msg.edit_text("❌ No voice data found.")
                 return
             
-            file = await context.bot.get_file(voice.file_id)
+            file = await context.bot.get_file(tg_voice.file_id)
             import tempfile
             import os
             
@@ -660,8 +774,17 @@ class TelegramBot:
                 await file.download_to_drive(tmp.name)
                 tmp_path = tmp.name
             
-            # Transcribe
-            transcript = await self._transcribe_audio(tmp_path)
+            # Use VoiceManager if available, else fallback
+            transcript = None
+            if self.voice:
+                try:
+                    result = await self.voice.listen(tmp_path)
+                    transcript = result.get("text", "") if isinstance(result, dict) else str(result)
+                except Exception as ve:
+                    logger.warning(f"VoiceManager STT failed: {ve}, falling back to whisper")
+                    transcript = await self._transcribe_audio(tmp_path)
+            else:
+                transcript = await self._transcribe_audio(tmp_path)
             
             # Cleanup
             os.unlink(tmp_path)
@@ -671,9 +794,8 @@ class TelegramBot:
                     f"🎙 <b>Transcribed:</b>\n\n{transcript}\n\n"
                     f"<i>Reply to start a conversation about this.</i>"
                 )
-                
-                # Optionally auto-respond to the transcribed text
-                context.user_data["pending_voice"] = transcript
+                # Auto-respond with chat
+                await self._handle_chat_message(update, transcript, context)
             else:
                 await progress_msg.edit_text("❌ Could not transcribe audio.")
                 

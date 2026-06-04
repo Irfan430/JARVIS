@@ -51,10 +51,11 @@ class BaseTool(ABC):
         self._enabled = True
         self._call_count = 0
 
-    @abstractmethod
     async def execute(self, **kwargs) -> ToolResult:
-        """Execute the tool with given parameters."""
-        ...
+        """Execute the tool with given parameters. Bridges to _execute if defined."""
+        if hasattr(self, '_execute'):
+            return await self._execute(**kwargs)
+        raise NotImplementedError(f"{self.name} must implement execute() or _execute()")
 
     def validate_params(self, **kwargs) -> None:
         """Validate required parameters are present."""
