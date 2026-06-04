@@ -1,0 +1,42 @@
+# ============================================
+# JARVIS AI Assistant - Configuration
+# ============================================
+
+debug: false
+log_level: INFO
+data_dir: ./data
+cache_ttl: 300
+
+telegram:
+  parse_mode: HTML
+
+ai:
+  provider: openai
+  model: gpt-4o
+  max_tokens: 4096
+  temperature: 0.7
+  system_prompt: >-
+    You are JARVIS, a highly capable AI assistant inspired by the AI from Iron Man.
+    You are helpful, witty, and slightly formal in tone.
+    Always strive to be accurate and useful.
+
+voice:
+  enabled: true
+  stt_provider: whisper
+  stt_model: base
+  tts_provider: edge-tts
+  tts_voice: en-US-GuyNeural
+  max_audio_duration: 120
+
+security:
+  rate_limit_enabled: true
+  rate_limit_requests: 30
+  rate_limit_window: 60
+  rate_limit_cooldown: 30
+  max_input_length: 4096
+  session_timeout: 3600
+
+search:
+  enabled: true
+  provider: duckduckgo
+  max_results: 5
